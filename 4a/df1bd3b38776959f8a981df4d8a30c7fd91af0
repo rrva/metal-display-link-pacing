@@ -1,0 +1,19 @@
+README.md
+  s_df4a39e30a53c5::t_fc22a8901a0552 67-79
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "4adf1bd3b38776959f8a981df4d8a30c7fd91af0",
+  "prompts": {},
+  "sessions": {
+    "s_df4a39e30a53c5": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "8a749dfd-65ad-4299-a920-03824fa7296b",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Ragnar Rova <ragnar.rova@gmail.com>"
+    }
+  }
+}
