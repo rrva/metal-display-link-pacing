@@ -30,6 +30,17 @@
 //   --produce-hz N                    with --producer: render from an N Hz timer
 //                                     instead of the main display link (Laban
 //                                     renders per input event, often above vsync)
+//   --poke-paused                     with --producer: read the display link's
+//                                     isPaused from the GPU completion handler on
+//                                     every publish and from the main thread on
+//                                     every produced frame
+//   --poke-range                      with --producer: assign the main tick link's
+//                                     preferredFrameRateRange (8-120, preferring
+//                                     120) and isPaused = false on every tick
+//   --ca-commit                       with --producer: move a small sibling
+//                                     CALayer on every tick, so the window's layer
+//                                     tree commits a Core Animation transaction
+//                                     per frame (as AppKit overlays do)
 
 import AppKit
 import Metal
@@ -51,6 +62,9 @@ struct Options {
   var srgb = false
   var large = false
   var produceHz = 0.0
+  var pokePaused = false
+  var pokeRange = false
+  var caCommit = false
 
   init(_ args: [String]) {
     var i = 1
@@ -73,6 +87,9 @@ struct Options {
       case "--srgb": srgb = true
       case "--large": large = true
       case "--produce-hz": produceHz = Double(value())!
+      case "--poke-paused": pokePaused = true
+      case "--poke-range": pokeRange = true
+      case "--ca-commit": caCommit = true
       default: fatalError("unknown option \(args[i])")
       }
       i += 1
@@ -92,11 +109,30 @@ final class Recorder: @unchecked Sendable {
   private let lock = NSLock()
   private var recording = false
   private var presents: [Present] = []
-  private var pending = 0
+  private var callbacks = 0
+  private var skipped = 0
+
+  /// Every display-link callback while recording, including ones that skip.
+  func countCallback(presented: Bool) {
+    lock.lock()
+    if recording {
+      callbacks += 1
+      if !presented { skipped += 1 }
+    }
+    lock.unlock()
+  }
+
+  var callbackCounts: (all: Int, skipped: Int) {
+    lock.lock()
+    defer { lock.unlock() }
+    return (callbacks, skipped)
+  }
 
   func start() {
     lock.lock()
     presents.removeAll()
+    callbacks = 0
+    skipped = 0
     recording = true
     lock.unlock()
   }
@@ -203,6 +239,7 @@ final class DisplayLinkDriver: NSObject, CAMetalDisplayLinkDelegate {
     recorder.track(update.drawable, callback: now, target: update.targetPresentationTimestamp)
     buffer.present(update.drawable)
     buffer.commit()
+    recorder.countCallback(presented: true)
   }
 }
 
@@ -224,12 +261,24 @@ final class ProducerDriver: NSObject, CAMetalDisplayLinkDelegate {
   var publishedVersion = 0
   var presentedVersion = 0
   let inFlight = DispatchSemaphore(value: 1)
+  let pokePaused: Bool
+  let pokeRange: Bool
+  var overlay: CALayer?
 
   init(view: NSView, layer: CAMetalLayer, renderer: Renderer, recorder: Recorder, options: Options, fps: Int) {
     self.renderer = renderer
     self.recorder = recorder
     presentQueue = renderer.device.makeCommandQueue()!
+    pokePaused = options.pokePaused
+    pokeRange = options.pokeRange
     super.init()
+    if options.caCommit {
+      let overlay = CALayer()
+      overlay.backgroundColor = CGColor(red: 0.9, green: 0.3, blue: 0.2, alpha: 1)
+      overlay.frame = CGRect(x: 20, y: 20, width: 40, height: 40)
+      layer.addSublayer(overlay)
+      self.overlay = overlay
+    }
     let size = layer.drawableSize
     let descriptor = MTLTextureDescriptor.texture2DDescriptor(
       pixelFormat: layer.pixelFormat, width: Int(size.width), height: Int(size.height), mipmapped: false)
@@ -263,10 +312,18 @@ final class ProducerDriver: NSObject, CAMetalDisplayLinkDelegate {
   }
 
   @objc func produce(_ tick: CADisplayLink) {
+    if let overlay {
+      overlay.position = CGPoint(x: 40 + 30 * sin(tick.targetTimestamp * 4), y: 40)
+    }
+    if pokeRange {
+      tick.preferredFrameRateRange = CAFrameRateRange(minimum: 8, maximum: 120, preferred: 120)
+      tick.isPaused = false
+    }
     render(time: tick.targetTimestamp)
   }
 
   func render(time: Double) {
+    if pokePaused, link.isPaused { link.isPaused = false }
     inFlight.wait()
     let target = ring[ringIndex]
     ringIndex = (ringIndex + 1) % ring.count
@@ -277,6 +334,7 @@ final class ProducerDriver: NSObject, CAMetalDisplayLinkDelegate {
         self.published = target
         self.publishedVersion += 1
         self.lock.unlock()
+        if self.pokePaused, self.link.isPaused { self.link.isPaused = false }
       }
       inFlight.signal()
     }
@@ -289,7 +347,10 @@ final class ProducerDriver: NSObject, CAMetalDisplayLinkDelegate {
     let source = published
     let version = publishedVersion
     lock.unlock()
-    guard let source, version != presentedVersion else { return }
+    guard let source, version != presentedVersion else {
+      recorder.countCallback(presented: false)
+      return
+    }
     presentedVersion = version
     let buffer = presentQueue.makeCommandBuffer()!
     let blit = buffer.makeBlitCommandEncoder()!
@@ -298,6 +359,7 @@ final class ProducerDriver: NSObject, CAMetalDisplayLinkDelegate {
     recorder.track(update.drawable, callback: now, target: update.targetPresentationTimestamp)
     buffer.present(update.drawable)
     buffer.commit()
+    recorder.countCallback(presented: true)
   }
 }
 
@@ -336,7 +398,10 @@ func percentile(_ values: [Double], _ p: Double) -> Double {
   return s[min(s.count - 1, Int(Double(s.count - 1) * p))]
 }
 
-func report(_ presents: [Present], options: Options, screen: NSScreen, fullscreenActive: Bool, layer: CAMetalLayer) {
+func report(
+  _ presents: [Present], callbacks: (all: Int, skipped: Int), options: Options, screen: NSScreen,
+  fullscreenActive: Bool, layer: CAMetalLayer
+) {
   let fps = screen.maximumFramesPerSecond
   let refresh = 1.0 / Double(fps)
   let shown = presents.filter { $0.onGlass > 0 }.map(\.onGlass).sorted()
@@ -355,11 +420,12 @@ func report(_ presents: [Present], options: Options, screen: NSScreen, fullscree
   print("""
     display      \(screen.localizedName), \(fps) Hz, scale \(screen.backingScaleFactor)
     window       \(fullscreenActive ? "fullscreen" : "windowed"), drawable \(Int(layer.drawableSize.width))x\(Int(layer.drawableSize.height))
-    path         \(options.mode.rawValue)\(options.producer ? "+producer" : "")\(options.thread ? "+thread" : "")\(options.srgb ? "+srgb" : ""), latency \(options.latency), maximumDrawableCount \(layer.maximumDrawableCount)
+    path         \(options.mode.rawValue)\(options.producer ? "+producer" : "")\(options.thread ? "+thread" : "")\(options.srgb ? "+srgb" : "")\(options.pokePaused ? "+poke-paused" : "")\(options.pokeRange ? "+poke-range" : "")\(options.caCommit ? "+ca-commit" : "")\(options.produceHz > 0 ? " produce \(Int(options.produceHz)) Hz" : ""), latency \(options.latency), maximumDrawableCount \(layer.maximumDrawableCount)
     frames       \(presents.count) presented, \(shown.count) on glass, \(dropped) dropped
     rate         \(fmt(shownPerSecond)) fresh frames/s on glass (display \(fps) Hz)
     missed       \(missed) of \(refreshesSpanned) refreshes (\(fmt(100 * Double(missed) / Double(max(1, refreshesSpanned))))%)
     gaps         \(histogram.sorted { $0.key < $1.key }.map { "\($0.key) refresh: \($0.value)" }.joined(separator: ", "))
+    callbacks    \(String(format: "%.1f", Double(callbacks.all) / options.seconds))/s, \(callbacks.skipped) skipped (nothing new to present)
     to glass     callback -> on glass p50 \(fmt(percentile(toGlass, 0.5))) ms, p95 \(fmt(percentile(toGlass, 0.95))) ms
     """)
   if !lead.isEmpty {
@@ -373,7 +439,8 @@ func report(_ presents: [Present], options: Options, screen: NSScreen, fullscree
     "srgb": options.srgb, "large": options.large, "produceHz": options.produceHz, "latency": options.latency, "drawables": layer.maximumDrawableCount,
     "shownPerSecond": shownPerSecond, "missedPercent": 100 * Double(missed) / Double(max(1, refreshesSpanned)),
     "dropped": dropped, "toGlassP50Ms": percentile(toGlass, 0.5),
-    "leadP50Ms": percentile(lead, 0.5),
+    "leadP50Ms": percentile(lead, 0.5), "callbacksPerSecond": Double(callbacks.all) / options.seconds,
+    "skippedCallbacks": callbacks.skipped, "pokePaused": options.pokePaused,
   ]
   let json = try! JSONSerialization.data(withJSONObject: result, options: [.sortedKeys])
   print("RESULT " + String(data: json, encoding: .utf8)!)
@@ -446,11 +513,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     DispatchQueue.main.asyncAfter(deadline: .now() + warmup) { [self] in
       recorder.start()
       DispatchQueue.main.asyncAfter(deadline: .now() + options.seconds) { [self] in
+        let callbacks = recorder.callbackCounts
         let presents = recorder.stop()
         // Let the last presented handlers land.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [self] in
           report(
-            presents, options: options, screen: window.screen ?? screen,
+            presents, callbacks: callbacks, options: options, screen: window.screen ?? screen,
             fullscreenActive: window.styleMask.contains(.fullScreen), layer: layer)
           exit(0)
         }

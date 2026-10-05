@@ -78,6 +78,26 @@ Display" at 120 Hz.
 On the 120 Hz panel the windowed lead is 5 refreshes (41.5 ms), and frames
 still sustain 94-99 % of the refresh rate.
 
+### Things that do not slow the display link down
+
+All on the built-in 120 Hz panel with `--producer --thread`. "Callbacks" counts
+every `CAMetalDisplayLink` callback, including those that had nothing new and
+let the drawable go unpresented.
+
+| Added behavior | Callbacks/s | Fresh frames/s on screen |
+| --- | --- | --- |
+| none | 126 | 119.2-119.4 |
+| `--produce-hz 90` (25 % of callbacks skip presenting) | 120 | 89.3 |
+| `--produce-hz 60` (50 % skip) | 120 | 60.0 |
+| `--poke-paused` (read `isPaused` on every publish and frame) | 126 | 118.7 |
+| `--poke-paused --produce-hz 90` | 120 | 89.7 |
+| `--poke-range` (assign the tick link's frame-rate range every tick) | 126 | 119.4 |
+| `--ca-commit` (move a sibling CALayer every tick) | 126 | 119.2 |
+| `METAL_CAPTURE_ENABLED=1` (Metal capture layer active) | n/a | 114.0-119.2 |
+
+With a slower producer, the fresh frame rate equals the producer's rate, but
+callbacks stay at the full 120 Hz.
+
 ## License
 
 MIT
