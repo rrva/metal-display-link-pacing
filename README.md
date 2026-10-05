@@ -98,6 +98,25 @@ let the drawable go unpresented.
 With a slower producer, the fresh frame rate equals the producer's rate, but
 callbacks stay at the full 120 Hz.
 
+## Display removal
+
+`--scenario unplug` uses the private `CGVirtualDisplay` API (declarations
+from Chromium's `virtual_display_mac_util.mm`, in
+`Sources/VirtualDisplayShim`) to create a 1920x1080 60 Hz virtual display,
+move the window onto it, then remove the display under the window, as when a
+cable is pulled. `--hold-virtual-display S` creates one for S seconds without
+a window, to pull it from under another app.
+
+On the built-in 120 Hz panel, this app's `CAMetalDisplayLink` returns to
+126 callbacks/s after the removal: without rebuilding the link, rebuilding it
+on `NSWindow.didChangeScreenNotification` (`--rebuild-on-change`), and also
+rebuilding on every `didChangeScreenParameters` (`--rebuild-on-params`).
+
+The window floats above other windows. A window fully hidden behind others
+gets its display link throttled to about 4 callbacks/s, which otherwise
+corrupts measurements taken while you use other apps. A partly covered window
+(`--cover 0.99`) is not throttled.
+
 ## License
 
 MIT

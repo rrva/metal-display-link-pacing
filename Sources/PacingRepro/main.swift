@@ -41,10 +41,28 @@
 //                                     CALayer on every tick, so the window's layer
 //                                     tree commits a Core Animation transaction
 //                                     per frame (as AppKit overlays do)
+//
+// Display removal (displaylink mode, no --producer):
+//   --scenario unplug                 measure on --screen, then create a virtual
+//                                     60 Hz display, move the window onto it and
+//                                     measure, then remove the display while the
+//                                     window is on it (macOS moves the window
+//                                     back, as on a cable unplug) and measure again
+//   --rebuild-on-change               recreate the CAMetalDisplayLink whenever the
+//                                     window changes screen
+//   --rebuild-on-params               also recreate it on every
+//                                     NSApplication.didChangeScreenParameters
+//   --hold-virtual-display S          no window: create a virtual 1920x1080 60 Hz
+//                                     display, print its display ID, keep it for S
+//                                     seconds, then remove it (to unplug it from
+//                                     under another app's window)
+//   --cover F                         cover fraction F (0-1) of the window's width
+//                                     with a second opaque window floating above it
 
 import AppKit
 import Metal
 import QuartzCore
+import VirtualDisplayShim
 
 // MARK: - Options
 
@@ -65,6 +83,11 @@ struct Options {
   var pokePaused = false
   var pokeRange = false
   var caCommit = false
+  var scenario = ""
+  var rebuildOnChange = false
+  var cover = 0.0
+  var rebuildOnParams = false
+  var holdVirtualDisplay = 0.0
 
   init(_ args: [String]) {
     var i = 1
@@ -90,6 +113,11 @@ struct Options {
       case "--poke-paused": pokePaused = true
       case "--poke-range": pokeRange = true
       case "--ca-commit": caCommit = true
+      case "--scenario": scenario = value()
+      case "--rebuild-on-change": rebuildOnChange = true
+      case "--cover": cover = Double(value())!
+      case "--rebuild-on-params": rebuildOnParams = true
+      case "--hold-virtual-display": holdVirtualDisplay = Double(value())!
       default: fatalError("unknown option \(args[i])")
       }
       i += 1
@@ -217,20 +245,37 @@ final class Renderer {
 /// CAMetalDisplayLink: the system hands over a drawable plus the time the frame
 /// will be shown, `preferredFrameLatency` frames ahead (in theory).
 final class DisplayLinkDriver: NSObject, CAMetalDisplayLinkDelegate {
-  let link: CAMetalDisplayLink
+  var link: CAMetalDisplayLink!
+  let layer: CAMetalLayer
   let renderer: Renderer
   let recorder: Recorder
+  let latency: Float
+  private(set) var rebuilds = 0
 
   init(layer: CAMetalLayer, renderer: Renderer, recorder: Recorder, options: Options, fps: Int) {
-    link = CAMetalDisplayLink(metalLayer: layer)
+    self.layer = layer
     self.renderer = renderer
     self.recorder = recorder
+    latency = options.latency
     super.init()
+    attach()
+  }
+
+  private func attach() {
+    link = CAMetalDisplayLink(metalLayer: layer)
     link.delegate = self
-    link.preferredFrameLatency = options.latency
-    link.preferredFrameRateRange = CAFrameRateRange(
-      minimum: 30, maximum: Float(fps), preferred: Float(fps))
+    link.preferredFrameLatency = latency
+    // 120 is the highest rate any attached panel offers here; the link runs at
+    // the window's display rate when that is lower.
+    link.preferredFrameRateRange = CAFrameRateRange(minimum: 30, maximum: 120, preferred: 120)
     link.add(to: .main, forMode: .common)
+  }
+
+  /// Replace the link with a fresh one bound to the layer's current display.
+  func rebuild() {
+    link.invalidate()
+    attach()
+    rebuilds += 1
   }
 
   func metalDisplayLink(_ link: CAMetalDisplayLink, needsUpdate update: CAMetalDisplayLink.Update) {
@@ -419,7 +464,7 @@ func report(
   let fmt = { (v: Double) in String(format: "%.1f", v) }
   print("""
     display      \(screen.localizedName), \(fps) Hz, scale \(screen.backingScaleFactor)
-    window       \(fullscreenActive ? "fullscreen" : "windowed"), drawable \(Int(layer.drawableSize.width))x\(Int(layer.drawableSize.height))
+    window       \(fullscreenActive ? "fullscreen" : "windowed")\(options.cover > 0 ? ", \(Int(options.cover * 100))% covered" : ""), drawable \(Int(layer.drawableSize.width))x\(Int(layer.drawableSize.height))
     path         \(options.mode.rawValue)\(options.producer ? "+producer" : "")\(options.thread ? "+thread" : "")\(options.srgb ? "+srgb" : "")\(options.pokePaused ? "+poke-paused" : "")\(options.pokeRange ? "+poke-range" : "")\(options.caCommit ? "+ca-commit" : "")\(options.produceHz > 0 ? " produce \(Int(options.produceHz)) Hz" : ""), latency \(options.latency), maximumDrawableCount \(layer.maximumDrawableCount)
     frames       \(presents.count) presented, \(shown.count) on glass, \(dropped) dropped
     rate         \(fmt(shownPerSecond)) fresh frames/s on glass (display \(fps) Hz)
@@ -457,6 +502,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
   var driver: AnyObject?
 
   func applicationDidFinishLaunching(_ notification: Notification) {
+    if options.holdVirtualDisplay > 0 {
+      let display = makeVirtualDisplay()
+      virtualDisplay = display
+      print("virtual display \(display.displayID) created; removing in \(options.holdVirtualDisplay) s")
+      fflush(stdout)
+      DispatchQueue.main.asyncAfter(deadline: .now() + options.holdVirtualDisplay) { [self] in
+        virtualDisplay = nil
+        print("virtual display removed")
+        fflush(stdout)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { exit(0) }
+      }
+      return
+    }
     let screens = NSScreen.screens
     guard options.screen < screens.count else {
       print("screen \(options.screen) not found; screens: \(screens.map(\.localizedName))")
@@ -492,7 +550,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       forName: NSWindow.didResizeNotification, object: window, queue: .main
     ) { [weak self] _ in self?.updateDrawableSize() }
 
+    // Float above other windows: a window left behind others (macOS will not
+    // activate a background launch while the user is typing elsewhere) gets
+    // its display link throttled to a few callbacks a second.
+    window.level = .floating
     window.makeKeyAndOrderFront(nil)
+    window.orderFrontRegardless()
     NSApp.activate(ignoringOtherApps: true)
     if options.fullscreen { window.toggleFullScreen(nil) }
 
@@ -509,6 +572,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       driver = NextDrawableDriver(view: view, layer: layer, renderer: renderer, recorder: recorder)
     }
 
+    if options.cover > 0 {
+      let f = window.frame
+      let cover = NSWindow(
+        contentRect: NSRect(x: f.minX, y: f.minY - 1, width: f.width * options.cover, height: f.height + 2),
+        styleMask: [.borderless], backing: .buffered, defer: false, screen: screen)
+      cover.backgroundColor = NSColor(calibratedWhite: 0.85, alpha: 1)
+      cover.isOpaque = true
+      cover.level = NSWindow.Level(rawValue: NSWindow.Level.floating.rawValue + 1)
+      cover.orderFrontRegardless()
+      coverWindow = cover
+    }
+
+    if options.scenario == "unplug" {
+      runUnplugScenario(home: screen)
+      return
+    }
+
     let warmup = options.warmup + (options.fullscreen ? 2 : 0)
     DispatchQueue.main.asyncAfter(deadline: .now() + warmup) { [self] in
       recorder.start()
@@ -521,6 +601,121 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             presents, callbacks: callbacks, options: options, screen: window.screen ?? screen,
             fullscreenActive: window.styleMask.contains(.fullScreen), layer: layer)
           exit(0)
+        }
+      }
+    }
+  }
+
+  // MARK: Display removal scenario
+
+  var virtualDisplay: CGVirtualDisplay?
+  var coverWindow: NSWindow?
+
+  /// Measure callbacks and fresh on-glass frames for `seconds`.
+  func measurePhase(_ name: String, seconds: Double, then next: @escaping () -> Void) {
+    recorder.start()
+    DispatchQueue.main.asyncAfter(deadline: .now() + seconds) { [self] in
+      let callbacks = recorder.callbackCounts
+      let presents = recorder.stop()
+      DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [self] in
+        let rate = Double(presents.filter { $0.onGlass > 0 }.count) / seconds
+        let screen = window.screen
+        let rebuilds = (driver as? DisplayLinkDriver)?.rebuilds ?? 0
+        let visible = window.occlusionState.contains(.visible)
+        print(String(
+          format: "%-22@ screen %-26@ %3d Hz | callbacks %6.1f/s | fresh on glass %6.1f/s | link rebuilds %d | visible %@",
+          name as NSString, (screen?.localizedName ?? "none") as NSString,
+          screen?.maximumFramesPerSecond ?? 0, Double(callbacks.all) / seconds, rate, rebuilds,
+          (visible ? "yes" : "NO") as NSString))
+        next()
+      }
+    }
+  }
+
+  func waitUntil(_ timeout: Double, _ condition: @escaping () -> Bool, then next: @escaping (Bool) -> Void) {
+    let deadline = Date().addingTimeInterval(timeout)
+    func poll() {
+      if condition() { return next(true) }
+      if Date() > deadline { return next(false) }
+      DispatchQueue.main.asyncAfter(deadline: .now() + 0.05, execute: poll)
+    }
+    poll()
+  }
+
+  /// A virtual 1920x1080 60 Hz display; it disappears when released.
+  func makeVirtualDisplay() -> CGVirtualDisplay {
+    let descriptor = CGVirtualDisplayDescriptor()
+    descriptor.queue = DispatchQueue.global(qos: .userInteractive)
+    descriptor.name = "PacingRepro virtual"
+    descriptor.maxPixelsWide = 1920
+    descriptor.maxPixelsHigh = 1080
+    descriptor.sizeInMillimeters = CGSize(width: 527, height: 296)
+    descriptor.whitePoint = CGPoint(x: 0.3125, y: 0.3291)
+    descriptor.redPrimary = CGPoint(x: 0.6797, y: 0.3203)
+    descriptor.greenPrimary = CGPoint(x: 0.2559, y: 0.6983)
+    descriptor.bluePrimary = CGPoint(x: 0.1494, y: 0.0557)
+    descriptor.vendorID = 0x1234
+    descriptor.productID = 0x5678
+    descriptor.serialNum = 1
+    let display = CGVirtualDisplay(descriptor: descriptor)
+    let settings = CGVirtualDisplaySettings()
+    settings.hiDPI = 0
+    settings.modes = [CGVirtualDisplayMode(width: 1920, height: 1080, refreshRate: 60)]
+    guard display.apply(settings) else {
+      print("virtual display: applySettings failed")
+      exit(3)
+    }
+    return display
+  }
+
+  func runUnplugScenario(home: NSScreen) {
+    print("displays at start: \(NSScreen.screens.map { "\($0.localizedName) \($0.maximumFramesPerSecond) Hz" })")
+    if options.rebuildOnChange {
+      NotificationCenter.default.addObserver(
+        forName: NSWindow.didChangeScreenNotification, object: window, queue: .main
+      ) { [weak self] _ in (self?.driver as? DisplayLinkDriver)?.rebuild() }
+    }
+    if options.rebuildOnParams {
+      NotificationCenter.default.addObserver(
+        forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main
+      ) { [weak self] _ in (self?.driver as? DisplayLinkDriver)?.rebuild() }
+    }
+    DispatchQueue.main.asyncAfter(deadline: .now() + options.warmup) { [self] in
+      measurePhase("1 before", seconds: 2) { [self] in
+        let display = makeVirtualDisplay()
+        virtualDisplay = display
+        let id = display.displayID
+        func virtualScreen() -> NSScreen? {
+          NSScreen.screens.first {
+            ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value == id
+          }
+        }
+        waitUntil(5, { virtualScreen() != nil }) { [self] found in
+          guard found, let target = virtualScreen() else {
+            print("virtual display \(id) never appeared as an NSScreen")
+            exit(3)
+          }
+          let f = target.visibleFrame
+          window.setFrame(
+            NSRect(x: f.minX + 40, y: f.minY + 40, width: 1200, height: 700), display: true)
+          waitUntil(5, { [self] in window.screen == target }) { [self] moved in
+            if !moved { print("window did not move to the virtual display") }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [self] in
+              measurePhase("2 on virtual display", seconds: 2) { [self] in
+                // Remove the display under the window, like pulling the cable.
+                virtualDisplay = nil
+                waitUntil(5, { [self] in window.screen != nil && window.screen != target }) { [self] _ in
+                  DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [self] in
+                    measurePhase("3 after removal", seconds: 2) { [self] in
+                      DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [self] in
+                        measurePhase("4 removal + 7 s", seconds: 2) { exit(0) }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
         }
       }
     }
