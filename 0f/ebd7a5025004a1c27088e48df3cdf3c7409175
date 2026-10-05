@@ -1,0 +1,28 @@
+Sources/PacingRepro/main.swift
+  s_df4a39e30a53c5::t_9409c09868805d 1-342
+  s_df4a39e30a53c5::t_c297bc14b1f62a 343-473
+.gitignore
+  s_df4a39e30a53c5::t_fb2ec92e2b5fdf 1-3
+LICENSE
+  s_df4a39e30a53c5::t_8ba684b2da7c5d 1-21
+Package.swift
+  s_df4a39e30a53c5::t_0926a799f70152 1-10
+README.md
+  s_df4a39e30a53c5::t_fbb3b3af645643 1-71
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "0febd7a5025004a1c27088e48df3cdf3c7409175",
+  "prompts": {},
+  "sessions": {
+    "s_df4a39e30a53c5": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "8a749dfd-65ad-4299-a920-03824fa7296b",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Ragnar Rova <ragnar.rova@gmail.com>"
+    }
+  }
+}
