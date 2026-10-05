@@ -64,7 +64,19 @@ Observations:
   (66.5 ms). Fullscreen frames land exactly on the target (49.8 ms), consistent
   with direct scan-out instead of window-server compositing.
 
-The 120 Hz built-in panel was not measured.
+### Built-in 120 Hz panel
+
+Same machine, with the external display disconnected: the built-in Liquid
+Retina XDR panel at 120 Hz.
+
+| Configuration | Fresh frames/s on screen | Missed refreshes | Lead (target - callback) | Callback -> on screen |
+| --- | --- | --- | --- | --- |
+| `CAMetalDisplayLink`, windowed 1200x800 | 113.3 | 5.6 % | 41.5 ms (5 refreshes) | 41.5 ms |
+| `--producer --thread --srgb --large` (3600x2204 drawable) | 114.4 | 4.7 % | 41.5 ms | 41.5 ms |
+| `--fullscreen --producer --thread --srgb` | 118.8 | 1.0 % | 41.5 ms | 41.5 ms |
+
+On the 120 Hz panel the windowed lead is 5 refreshes (41.5 ms), and frames
+still sustain 94-99 % of the refresh rate.
 
 ## License
 
