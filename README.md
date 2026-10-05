@@ -66,8 +66,8 @@ Observations:
 
 ### Built-in 120 Hz panel
 
-Same machine, with the external display disconnected: the built-in Liquid
-Retina XDR panel at 120 Hz.
+Same machine, with the external display disconnected: the "Built-in Retina
+Display" at 120 Hz.
 
 | Configuration | Fresh frames/s on screen | Missed refreshes | Lead (target - callback) | Callback -> on screen |
 | --- | --- | --- | --- | --- |
