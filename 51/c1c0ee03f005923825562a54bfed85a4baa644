@@ -1,0 +1,27 @@
+Package.swift
+  s_df4a39e30a53c5::t_7a040b1ffd9e65 8-10
+README.md
+  s_df4a39e30a53c5::t_fea39b543491e9 101-119
+Sources/PacingRepro/main.swift
+  s_df4a39e30a53c5::t_0933ed15909114 44-60,65,86-90,116-120,248-249,252-253,256,259,261-265,267-270,274-280,467,505-517,553-556,558,575-591,609-723
+Sources/VirtualDisplayShim/VirtualDisplayShim.m
+  s_df4a39e30a53c5::t_204df1d4f1a852 1-3
+Sources/VirtualDisplayShim/include/VirtualDisplayShim.h
+  s_df4a39e30a53c5::t_0c9b4fa771b344 1-46
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "51c1c0ee03f005923825562a54bfed85a4baa644",
+  "prompts": {},
+  "sessions": {
+    "s_df4a39e30a53c5": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "8a749dfd-65ad-4299-a920-03824fa7296b",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Ragnar Rova <ragnar.rova@gmail.com>"
+    }
+  }
+}
